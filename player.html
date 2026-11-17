@@ -143,6 +143,13 @@ svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColo
 .side { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .block { display: grid; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .block h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.block-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; }
+.gear { min-width: 36px; height: 36px; margin: -6px -8px -6px 0; color: var(--muted); }
+.gear[aria-expanded="true"] { color: var(--fg); background: var(--hover); }
+.gear svg { width: 20px; height: 20px; }
+#settingsBlock { background: var(--stage); }
+.actions-row { display: flex; gap: 8px; }
+.rec-status.ok { color: var(--ok); }
 .field { display: grid; gap: 6px; }
 .field label { font-size: 13px; color: var(--muted); }
 .field-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
@@ -230,8 +237,34 @@ svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColo
   </section>
 
   <aside class="side" aria-label="Запись, записи и метки">
+    <div class="block" id="settingsBlock" hidden>
+      <div class="block-head">
+        <h2>Настройки</h2>
+      </div>
+      <div class="field">
+        <label for="setHost">Адрес Plixus</label>
+        <div class="field-row">
+          <input id="setHost" type="text" maxlength="100" placeholder="10.0.20.32" autocomplete="off" spellcheck="false">
+          <button class="btn" id="checkBtn" type="button">Проверить связь</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="setDir">Папка для записей</label>
+        <input id="setDir" type="text" maxlength="300" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="rec-status" id="setMsg"></p>
+      <div class="actions-row">
+        <button class="btn" id="saveSettings" type="button">Сохранить</button>
+        <button class="btn" id="cancelSettings" type="button">Отмена</button>
+      </div>
+    </div>
     <div class="block">
-      <h2>Запись на Plixus</h2>
+      <div class="block-head">
+        <h2>Запись на Plixus</h2>
+        <button class="icon-btn gear" id="gearBtn" type="button" title="Настройки: адрес Plixus и папка записей" aria-label="Настройки" aria-expanded="false" aria-controls="settingsBlock">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+      </div>
       <div class="field">
         <label for="recName">Название</label>
         <div class="field-row">
@@ -339,7 +372,7 @@ function renderStatus() {
     conn.textContent = "Программа записи не запущена: откройте «Запустить.bat»";
     conn.dataset.state = "error";
   } else if (!status.plixus) {
-    conn.textContent = "Нет связи с Plixus " + status.host + ", пробую снова";
+    conn.textContent = "Нет связи с Plixus " + status.host + ", пробую снова. Адрес меняется в настройках (шестерёнка справа)";
     conn.dataset.state = "error";
   } else {
     conn.textContent = "Plixus " + status.host;
@@ -403,6 +436,67 @@ $("recBtn").addEventListener("click", async () => {
 });
 
 $("refreshBtn").addEventListener("click", () => api("/api/sync", {}).catch(() => {}));
+
+/* ---------- Настройки: адрес Plixus и папка записей ---------- */
+
+function setMsg(text, kind) {
+  const el = $("setMsg");
+  el.textContent = text || "";
+  el.classList.toggle("ok", kind === "ok");
+  el.classList.toggle("err", kind === "err");
+}
+
+async function openSettings() {
+  try {
+    const s = await api("/api/settings");
+    $("setHost").value = s.host;
+    $("setDir").value = s.rec_dir;
+    setMsg("Настройки хранятся в " + s.config);
+  } catch (e) {
+    setMsg(e.message, "err");
+  }
+  $("settingsBlock").hidden = false;
+  $("gearBtn").setAttribute("aria-expanded", "true");
+  $("setHost").focus();
+}
+
+function closeSettings() {
+  $("settingsBlock").hidden = true;
+  $("gearBtn").setAttribute("aria-expanded", "false");
+}
+
+$("gearBtn").addEventListener("click", () => ($("settingsBlock").hidden ? openSettings() : closeSettings()));
+$("cancelSettings").addEventListener("click", closeSettings);
+
+$("checkBtn").addEventListener("click", async () => {
+  const host = $("setHost").value.trim();
+  if (!host) { setMsg("Укажите адрес Plixus", "err"); $("setHost").focus(); return; }
+  $("checkBtn").disabled = true;
+  setMsg("Проверяю связь с " + host + "…");
+  try {
+    const res = await fetch("/api/check", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host }),
+    });
+    const data = await res.json();
+    setMsg(data.message, data.ok ? "ok" : "err");
+  } catch {
+    setMsg("Программа не ответила", "err");
+  }
+  $("checkBtn").disabled = false;
+});
+
+$("saveSettings").addEventListener("click", async () => {
+  $("saveSettings").disabled = true;
+  try {
+    await api("/api/settings", { host: $("setHost").value.trim(), rec_dir: $("setDir").value.trim() });
+    setMsg("Сохранено", "ok");
+    await loadRecordings();
+    setTimeout(closeSettings, 900);
+  } catch (e) {
+    setMsg(e.message, "err");
+  }
+  $("saveSettings").disabled = false;
+});
 
 /* ---------- Выбор записи ---------- */
 

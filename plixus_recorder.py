@@ -1,7 +1,9 @@
 """Запись с Televic Plixus: старт/стоп из плеера, метки микрофонов, скачивание файлов по папкам.
 
-Запуск: python plixus_recorder.py  (или «Запустить.bat»), плеер откроется на http://localhost:8765
-Настройки через переменные окружения: PLIXUS_HOST (по умолчанию 10.0.20.32), PLIXUS_REC_DIR (папка записей).
+Запуск: python plixus_recorder.py  (или «Запустить.bat», или PleerPlixus.exe), плеер откроется на http://localhost:8765
+Настройки — config.json рядом с программой ({"host": "...", "rec_dir": "..."}), их же меняет шестерёнка в плеере.
+Переменные окружения PLIXUS_HOST и PLIXUS_REC_DIR, если заданы, важнее файла.
+Проверка связи без запуска: PleerPlixus.exe --check 10.0.20.32  (код выхода 0 — Plixus ответил).
 """
 import asyncio
 import json
@@ -19,11 +21,15 @@ from urllib.parse import quote, unquote, urlparse
 
 import websockets
 
-HOST = os.environ.get("PLIXUS_HOST", "10.0.20.32")
+FROZEN = getattr(sys, "frozen", False)                       # собрано в exe
+APP_DIR = Path(sys.executable if FROZEN else __file__).resolve().parent
+RES_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))             # где лежит player.html
+CONFIG_PATH = APP_DIR / "config.json"
+DEFAULT_HOST = "10.0.20.32"
 WS_PORT = 6111
 HTTP_PORT = 8765
-BASE = Path(__file__).resolve().parent
-REC_DIR = Path(os.environ.get("PLIXUS_REC_DIR", BASE / "Записи"))
+HOST = DEFAULT_HOST
+REC_DIR = APP_DIR / "Записи"
 JOURNAL = REC_DIR / "_journal.json"
 STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})_(\d{2})h(\d{2})m(\d{2})s")
 SYNC_EVERY = 60
@@ -72,7 +78,7 @@ def channel_label(file_name, match, suffix=""):
 
 def read_json(path, default):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return default
 
@@ -81,6 +87,48 @@ def write_json(path, data):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(path)
+
+
+def load_config():
+    cfg = read_json(CONFIG_PATH, {})
+    host = (os.environ.get("PLIXUS_HOST") or cfg.get("host") or DEFAULT_HOST).strip()
+    rec = os.environ.get("PLIXUS_REC_DIR") or cfg.get("rec_dir") or str(APP_DIR / "Записи")
+    port = int(cfg.get("port") or HTTP_PORT)
+    return host, Path(os.path.expandvars(rec)).expanduser(), port
+
+
+def apply_config(host, rec_dir, port=None):
+    global HOST, REC_DIR, JOURNAL, HTTP_PORT
+    HOST, REC_DIR = host, Path(rec_dir)
+    JOURNAL = REC_DIR / "_journal.json"
+    if port:
+        HTTP_PORT = port
+
+
+def ensure_dir(path):
+    """Создать папку и убедиться, что в неё можно писать."""
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / ".write_test"
+    probe.write_text("ok", encoding="utf-8")
+    probe.unlink()
+
+
+async def check_plixus(host, timeout=5):
+    """Plixus отвечает и у него есть модуль записи?"""
+    try:
+        async with websockets.connect(f"ws://{host}:{WS_PORT}", subprotocols=["unicos-v2"],
+                                      open_timeout=timeout, ping_interval=None) as ws:
+            await ws.send(json.dumps({"module": "connection", "name": "get_api_versions", "data": None}))
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout))
+            modules = [m.get("name") for m in (msg.get("data") or [])]
+            if "recording" not in modules:
+                return False, f"{host} ответил, но модуля записи у него нет"
+            return True, f"Plixus {host} отвечает"
+    except Exception:
+        return False, f"Нет ответа от {host} (порт {WS_PORT}). Проверьте адрес и что компьютер в той же сети"
+
+
+apply_config(*load_config())
 
 
 class Plixus:
@@ -101,6 +149,43 @@ class Plixus:
         self.version = 0          # растёт, когда в папке записей что-то изменилось
         self.last_error = ""
         self.journal = read_json(JOURNAL, {})
+        self.reconnect_now = False
+
+    # ---------- настройки ----------
+
+    def settings_info(self):
+        return {"host": HOST, "rec_dir": str(REC_DIR), "default_host": DEFAULT_HOST,
+                "config": str(CONFIG_PATH)}
+
+    async def apply_settings(self, host, rec_dir):
+        if self.state != "idle" or self.session or self.finishing:
+            raise RuntimeError("Во время записи настройки менять нельзя")
+        host = (host or "").strip()
+        if not host:
+            raise RuntimeError("Укажите адрес Plixus")
+        rec = Path(os.path.expandvars((rec_dir or "").strip() or str(REC_DIR))).expanduser()
+        try:
+            await asyncio.to_thread(ensure_dir, rec)
+        except OSError:
+            raise RuntimeError(f"Нет доступа к папке {rec}")
+        cfg = read_json(CONFIG_PATH, {})
+        cfg.update({"host": host, "rec_dir": str(rec)})
+        try:
+            write_json(CONFIG_PATH, cfg)
+        except OSError:
+            raise RuntimeError(f"Не удалось сохранить настройки в {CONFIG_PATH}")
+        old_host = HOST
+        async with self.sync_lock:
+            apply_config(host, rec)
+            self.journal = {**read_json(JOURNAL, {}), **self.journal}
+            write_json(JOURNAL, self.journal)
+            self.version += 1
+        log("Настройки сохранены: Plixus", host, "| записи:", rec)
+        if host != old_host:
+            self.files = {"internal": [], "external": []}
+            self.reconnect_now = True
+            if self.ws:
+                await self.ws.close()
 
     # ---------- связь ----------
 
@@ -154,7 +239,8 @@ class Plixus:
                 if self.connected or not self.last_error:
                     log("Нет связи с Plixus:", e)
             self.ws, self.connected = None, False
-            await asyncio.sleep(5)
+            await asyncio.sleep(0.3 if self.reconnect_now else 5)
+            self.reconnect_now = False
 
     async def lifecheck(self):
         while True:
@@ -332,9 +418,10 @@ class Plixus:
     # ---------- скачивание в папки ----------
 
     async def sync_loop(self):
+        await asyncio.sleep(5)  # первое скачивание — сразу после запуска
         while True:
-            await asyncio.sleep(SYNC_EVERY)
             await self.sync()
+            await asyncio.sleep(SYNC_EVERY)
 
     async def sync(self, force=False):
         if not self.connected or self.state != "idle":
@@ -486,9 +573,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
         if path in ("/", "/index.html"):
-            return self.serve(BASE / "player.html", "text/html; charset=utf-8")
+            return self.serve(RES_DIR / "player.html", "text/html; charset=utf-8")
         if path == "/api/status":
             return self.reply_json(self.plx.status())
+        if path == "/api/settings":
+            return self.reply_json(self.plx.settings_info())
         if path == "/api/recordings":
             return self.reply_json(self.plx.recordings())
         if path.startswith("/rec/"):
@@ -501,7 +590,13 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+        if path == "/api/check":
+            ok, text = self.call(check_plixus(str(body.get("host", "")).strip() or HOST))
+            return self.reply_json({"ok": ok, "message": text})
         try:
+            if path == "/api/settings":
+                self.call(self.plx.apply_settings(body.get("host"), body.get("rec_dir")))
+                return self.reply_json({"ok": True, **self.plx.settings_info()})
             if path == "/api/start":
                 self.call(self.plx.start(str(body.get("name", ""))[:80]))
             elif path == "/api/stop":
@@ -559,7 +654,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    REC_DIR.mkdir(parents=True, exist_ok=True)
+    if "--check" in sys.argv:
+        i = sys.argv.index("--check")
+        host = sys.argv[i + 1] if i + 1 < len(sys.argv) else HOST
+        ok, text = asyncio.run(check_plixus(host))
+        print(text)
+        sys.exit(0 if ok else 1)
+    try:
+        ensure_dir(REC_DIR)
+    except OSError:
+        fallback = APP_DIR / "Записи"
+        log("Нет доступа к папке записей", REC_DIR, "— пишу в", fallback)
+        apply_config(HOST, fallback)
+        ensure_dir(REC_DIR)
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
     plx = Plixus(loop)
