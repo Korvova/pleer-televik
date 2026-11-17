@@ -96,6 +96,7 @@ class Plixus:
         self.session = None       # текущая запись
         self.waiters = []
         self.sync_lock = asyncio.Lock()
+        self.finishing = 0        # сколько остановленных записей ещё разбирается
         self.sync_text = ""
         self.version = 0          # растёт, когда в папке записей что-то изменилось
         self.last_error = ""
@@ -235,6 +236,7 @@ class Plixus:
             s["open"] = {}
             s["duration"] = end
             self.session = None
+            self.finishing += 1  # пока запись не разобрана, плановое скачивание её не трогает
             asyncio.create_task(self.finish(s))
 
     def new_session(self, name, old_prefix):
@@ -287,6 +289,13 @@ class Plixus:
             log("Не удалось вернуть префикс:", e)
 
     async def finish(self, s):
+        try:
+            await self._finish(s)
+        finally:
+            self.finishing -= 1
+        await self.sync(force=True)
+
+    async def _finish(self, s):
         await self.restore_prefix(s["old_prefix"])
         new = []
         for _ in range(6):
@@ -316,7 +325,6 @@ class Plixus:
             }
         write_json(JOURNAL, self.journal)
         log("Запись завершена:", ", ".join(new), "| меток:", len(s["marks"]))
-        await self.sync()
 
     # ---------- скачивание в папки ----------
 
@@ -325,8 +333,10 @@ class Plixus:
             await asyncio.sleep(SYNC_EVERY)
             await self.sync()
 
-    async def sync(self):
-        if not self.connected or self.state != "idle" or self.sync_lock.locked():
+    async def sync(self, force=False):
+        if not self.connected or self.state != "idle":
+            return
+        if not force and (self.finishing or self.sync_lock.locked()):
             return
         async with self.sync_lock:
             try:
@@ -347,8 +357,9 @@ class Plixus:
         found = {}
         for meta_path in REC_DIR.glob("*/meta.json"):
             meta = read_json(meta_path, {})
-            if meta.get("stamp"):
-                found[meta["stamp"]] = meta_path.parent
+            stamp = meta.get("stamp")
+            if stamp and (stamp not in found or meta.get("name")):
+                found[stamp] = meta_path.parent
         return found
 
     def download_all(self):
@@ -359,21 +370,35 @@ class Plixus:
                 file_name = path.rsplit("/", 1)[-1]
                 m = STAMP.search(file_name)
                 if m:
-                    groups.setdefault(m.group(0), []).append((path, channel_label(file_name, m, suffix)))
+                    prefix = file_name[:m.start()].strip("_- ")
+                    groups.setdefault(m.group(0), []).append((path, channel_label(file_name, m, suffix), prefix))
         folders = self.folders_by_stamp()
         changed = False
         for stamp, items in sorted(groups.items()):
             info = self.journal.get(stamp, {})
             folder = folders.get(stamp)
+            meta = read_json(folder / "meta.json", {}) if folder else {}
+            # название: из плеера → уже записанное → префикс Plixus (запись запущена из админки)
+            prefix_name = next((p for _, _, p in items if p), "").replace("_", " ").strip()
+            name = info.get("name") or meta.get("name") or prefix_name
+            y, mo, d, h, mi, se = STAMP.match(stamp).groups()
+            title = f"{y}-{mo}-{d} {h}-{mi}-{se}" + (f" {safe_name(name)}" if name else "")
             if folder is None:
-                y, mo, d, h, mi, se = STAMP.match(stamp).groups()
-                title = f"{y}-{mo}-{d} {h}-{mi}-{se}" + (f" {safe_name(info['name'])}" if info.get("name") else "")
                 folder = REC_DIR / title
                 folder.mkdir(parents=True, exist_ok=True)
+                # meta.json сразу, чтобы следующий проход нашёл папку по времени старта, а не завёл вторую
+                meta = {"stamp": stamp, "name": name, "channels": [], "marks": info.get("marks", [])}
+                write_json(folder / "meta.json", meta)
+                changed = True
+            elif name and folder.name != title and not (REC_DIR / title).exists():
+                try:
+                    folder = folder.rename(REC_DIR / title)
+                    changed = True
+                except OSError as e:
+                    log("Не удалось переименовать папку", folder.name, e)
             meta_path = folder / "meta.json"
-            meta = read_json(meta_path, {})
             channels = {c["label"]: c for c in meta.get("channels", [])}
-            for n, (path, label) in enumerate(sorted(items, key=lambda x: (x[1] != "Floor", x[1]))):
+            for path, label, _ in sorted(items, key=lambda x: (x[1] != "Floor", x[1])):
                 ext = Path(path).suffix or ".mp3"
                 target = folder / (safe_name(label) + ext)
                 url = f"http://{HOST}{quote(path)}"
@@ -390,7 +415,7 @@ class Plixus:
             y, mo, d, h, mi, se = STAMP.match(stamp).groups()
             new_meta = {
                 "stamp": stamp,
-                "name": info.get("name", meta.get("name", "")),
+                "name": name,
                 "plixus_start": f"{y}-{mo}-{d}T{h}:{mi}:{se}",
                 "started": info.get("started", meta.get("started")),
                 "channels": sorted(channels.values(), key=lambda c: (c["label"] != "Floor", c["label"])),
@@ -404,8 +429,15 @@ class Plixus:
 
     def recordings(self):
         out = []
-        for meta_path in REC_DIR.glob("*/meta.json"):
-            meta = read_json(meta_path, {})
+        seen = set()
+        # если у одной записи вдруг две папки — показываем ту, что с названием
+        metas = [(p, read_json(p, {})) for p in REC_DIR.glob("*/meta.json")]
+        metas.sort(key=lambda pm: (not pm[1].get("name"), pm[0].parent.name))
+        for meta_path, meta in metas:
+            stamp = meta.get("stamp", "")
+            if stamp and stamp in seen:
+                continue
+            seen.add(stamp)
             folder = meta_path.parent.name
             channels = [{"label": c["label"], "url": f"/rec/{quote(folder)}/{quote(c['file'])}"}
                         for c in meta.get("channels", []) if (meta_path.parent / c["file"]).exists()]
