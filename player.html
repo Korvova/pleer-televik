@@ -330,7 +330,10 @@ async function loadRecordings() {
 
 function renderStatus() {
   const conn = $("conn");
-  if (!status) {
+  if (location.protocol === "file:") {
+    conn.textContent = "Этот файл не открывают напрямую: запустите «Запустить.bat», плеер откроется сам на http://localhost:8765";
+    conn.dataset.state = "error";
+  } else if (!status) {
     conn.textContent = "Программа записи не запущена: откройте «Запустить.bat»";
     conn.dataset.state = "error";
   } else if (!status.plixus) {
