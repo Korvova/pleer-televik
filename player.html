@@ -218,11 +218,11 @@ svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColo
         <button class="icon-btn skip" id="fwdBtn" type="button" title="Вперёд на 10 секунд" aria-label="Вперёд на 10 секунд">+10</button>
       </div>
       <div class="actions">
-        <button class="btn" id="uploadBtn" type="button" title="Открыть аудиофайлы с компьютера">
+        <button class="btn" id="uploadBtn" type="button" title="Открыть аудиофайлы с компьютера. Чтобы были метки, выделите в папке записи все файлы вместе с meta.json">
           <svg viewBox="0 0 24 24"><path d="M12 16V5m0 0-4.5 4.5M12 5l4.5 4.5M5 19h14"/></svg>
           Загрузить аудио
         </button>
-        <input type="file" id="fileInput" accept="audio/*" multiple hidden>
+        <input type="file" id="fileInput" accept="audio/*,.json,application/json" multiple hidden>
       </div>
     </div>
   </section>
@@ -682,15 +682,38 @@ $("micFilter").addEventListener("change", e => { mic = e.target.value; render();
 $("recSelect").addEventListener("change", e => loadSession(allSessions().find(s => s.id === e.target.value) || null));
 
 $("uploadBtn").addEventListener("click", () => $("fileInput").click());
-$("fileInput").addEventListener("change", e => {
-  const files = [...e.target.files];
+$("fileInput").addEventListener("change", async e => {
+  const picked = [...e.target.files];
   e.target.value = "";
-  if (!files.length) return;
+  const isMeta = f => /\.json$/i.test(f.name);
+  const audio = picked.filter(f => !isMeta(f));
+  if (!audio.length) {
+    if (picked.length) $("recStatus").textContent = "Выберите вместе с meta.json и сами аудиофайлы записи";
+    return;
+  }
+  // meta.json из папки записи: название, подписи каналов и метки микрофонов
+  let meta = null;
+  const metaFile = picked.find(f => f.name.toLowerCase() === "meta.json") || picked.find(isMeta);
+  if (metaFile) {
+    try { meta = JSON.parse(await metaFile.text()); } catch { meta = null; }
+  }
+  const metaChannels = (meta && Array.isArray(meta.channels)) ? meta.channels : [];
+  const order = f => {
+    const i = metaChannels.findIndex(c => c.file === f.name);
+    return i < 0 ? metaChannels.length : i;
+  };
+  audio.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, "ru"));
+  const marksOk = meta && Array.isArray(meta.marks) ? meta.marks.filter(m => isFinite(m.start) && isFinite(m.end)) : [];
+  const title = (meta && (meta.name || meta.stamp)) ||
+    (audio.length === 1 ? audio[0].name : "Свои файлы (" + audio.length + ")");
   const session = {
     id: "local:" + Date.now(),
-    title: files.length === 1 ? files[0].name : "Свои файлы (" + files.length + ")",
-    channels: files.map(f => ({ url: URL.createObjectURL(f), label: f.name.replace(/\.[^.]+$/, "") })),
-    marks: [],
+    title: title + (marksOk.length ? " · меток: " + marksOk.length : ""),
+    channels: audio.map(f => {
+      const c = metaChannels.find(x => x.file === f.name);
+      return { url: URL.createObjectURL(f), label: c ? c.label : f.name.replace(/\.[^.]+$/, "") };
+    }),
+    marks: marksOk.map(m => ({ seat: m.seat, label: m.label || "Мик " + m.seat, start: +m.start, end: +m.end })),
   };
   localSessions.unshift(session);
   renderSessionSelect();
