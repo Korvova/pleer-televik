@@ -153,6 +153,8 @@ svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColo
 .rec-btn[data-on="true"] .dot { border-radius: 2px; background: var(--panel); }
 .rec-status { margin: 0; font-size: 13px; color: var(--muted); min-height: 18px; }
 .rec-status.err { color: var(--rec); }
+.field input.invalid { border-color: var(--rec); box-shadow: 0 0 0 1px var(--rec); }
+.field input.invalid::placeholder { color: var(--rec); opacity: .7; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { height: 32px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; font-size: 13px; }
 .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--muted)); }
@@ -233,7 +235,7 @@ svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColo
       <div class="field">
         <label for="recName">Название</label>
         <div class="field-row">
-          <input id="recName" type="text" maxlength="80" placeholder="Например, Совет 17.11" autocomplete="off">
+          <input id="recName" type="text" maxlength="80" placeholder="Например, Совет 17.11" autocomplete="off" required aria-describedby="recStatus">
           <button class="btn rec-btn" id="recBtn" type="button" data-on="false"><span class="dot"></span><span id="recBtnText">Запись</span></button>
         </div>
       </div>
@@ -361,16 +363,32 @@ function renderStatus() {
   $("refreshBtn").disabled = !status || !status.plixus;
 
   const line = $("recStatus");
-  line.classList.toggle("err", !!(status && status.error));
-  if (!status) line.textContent = "";
+  line.classList.toggle("err", nameMissing || !!(status && status.error));
+  if (nameMissing && !recording) line.textContent = "Введите название записи";
+  else if (!status) line.textContent = "";
   else if (status.error) line.textContent = status.error;
   else if (recording) line.textContent = "Пишется на Plixus. После «Стоп» файлы скачаются сами.";
   else if (status.sync) line.textContent = status.sync;
   else line.textContent = "Записи сохраняются в " + status.folder;
 }
 
+let nameMissing = false;
+function setNameMissing(on) {
+  nameMissing = on;
+  $("recName").classList.toggle("invalid", on);
+  $("recName").setAttribute("aria-invalid", String(on));
+  renderStatus();
+}
+$("recName").addEventListener("input", () => { if (nameMissing && $("recName").value.trim()) setNameMissing(false); });
+$("recName").addEventListener("keydown", e => { if (e.key === "Enter") $("recBtn").click(); });
+
 $("recBtn").addEventListener("click", async () => {
   const recording = status && (status.state === "active" || status.state === "paused");
+  if (!recording && !$("recName").value.trim()) {
+    setNameMissing(true);
+    $("recName").focus();
+    return;
+  }
   busy = true;
   renderStatus();
   try {

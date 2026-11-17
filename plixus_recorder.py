@@ -245,6 +245,9 @@ class Plixus:
                 "paused_at": None, "paused_total": 0.0, "open": {}, "marks": [], "duration": None}
 
     async def start(self, name):
+        name = name.strip()
+        if not name:
+            raise RuntimeError("Введите название записи")
         if not self.connected:
             raise RuntimeError("Нет связи с Plixus")
         if self.state != "idle":
