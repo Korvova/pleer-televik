@@ -1,0 +1,4 @@
+Записи/
+__pycache__/
+*.part
+.env
