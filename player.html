@@ -565,7 +565,7 @@ function renderLanes() {
   };
   tracks.forEach((t, i) => addLane(t.label, t.color, channel >= 0 && i !== channel ? "dim" : "",
     t.error ? [] : [[0, durationOf(t) || total]]));
-  const seats = [...new Set(marks.map(m => m.seat))];
+  const seats = [...new Set(marks.map(m => m.seat))].sort((x, y) => x - y);
   seats.forEach((seat, n) => {
     const own = marks.filter(m => m.seat === seat);
     addLane(own[0].label, own[0].color, "mic" + (n === 0 ? " sep" : "") + (mic && mic !== seat ? " dim" : ""),
@@ -611,7 +611,7 @@ function renderMarks() {
   const select = $("micFilter");
   select.innerHTML = "";
   select.add(new Option("Все микрофоны", ""));
-  [...new Map(marks.map(m => [m.seat, m.label])).entries()].forEach(([seat, label]) =>
+  [...new Map(marks.map(m => [m.seat, m.label])).entries()].sort((x, y) => x[0] - y[0]).forEach(([seat, label]) =>
     select.add(new Option(label + " (" + marks.filter(m => m.seat === seat).length + ")", seat)));
   select.value = mic;
   select.disabled = !marks.length;
